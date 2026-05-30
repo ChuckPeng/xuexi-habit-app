@@ -1,40 +1,66 @@
 import pg from 'pg'
 const { Pool } = pg
 
-// 解析 DATABASE_URL 环境变量
-function parseDatabaseUrl(url) {
-  if (!url) {
-    // 生产环境必须提供 DATABASE_URL，禁止使用默认密码
-    if (process.env.NODE_ENV === 'production') {
-      throw new Error('【安全错误】生产环境必须设置 DATABASE_URL 环境变量！')
-    }
-    return { host: 'localhost', port: 5432, database: 'xuexi', user: 'postgres', password: 'xuexi123456' }
-  }
-  const match = url.match(/postgresql:\/\/([^:]+):([^@]+)@([^:]+):(\d+)\/(.+)/)
-  if (match) {
+/**
+ * 数据库连接配置 — 优先级：独立环境变量 > DATABASE_URL
+ * 生产环境强制要求显式配置，禁止硬编码回退。
+ */
+
+function buildConfig() {
+  const dbHost = process.env.DB_HOST
+  const dbPort = process.env.DB_PORT
+  const dbName = process.env.DB_NAME
+  const dbUser = process.env.DB_USER
+  const dbPassword = process.env.DB_PASSWORD
+
+  if (dbHost && dbName && dbUser && dbPassword) {
     return {
-      user: match[1],
-      password: match[2],
-      host: match[3],
-      port: parseInt(match[4]),
-      database: match[5]
+      host: dbHost,
+      port: parseInt(dbPort || '5432', 10),
+      database: dbName,
+      user: dbUser,
+      password: dbPassword,
     }
   }
-  // 仍然允许不通过 URL 的配置
-  return { 
-    host: process.env.DB_HOST || 'localhost', 
-    port: parseInt(process.env.DB_PORT || '5432'), 
-    database: process.env.DB_NAME || 'xuexi', 
-    user: process.env.DB_USER || 'postgres', 
-    password: process.env.DB_PASSWORD || 'xuexi123456' 
+
+  const dbUrl = process.env.DATABASE_URL
+  if (dbUrl) {
+    const match = dbUrl.match(
+      /postgres(?:ql)?:\/\/([^:]+):([^@]+)@([^:]+):(\d+)\/(.+)/
+    )
+    if (match) {
+      return {
+        user: match[1],
+        password: match[2],
+        host: match[3],
+        port: parseInt(match[4], 10),
+        database: match[5],
+      }
+    }
+  }
+
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      '【安全错误】生产环境必须通过 DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD 或 DATABASE_URL 环境变量配置数据库连接'
+    )
+  }
+
+  console.warn('⚠ 未检测到数据库环境变量，使用本地开发默认值')
+  return {
+    host: 'localhost',
+    port: 5432,
+    database: 'xuexi',
+    user: 'postgres',
+    password: 'xuexi123456',
   }
 }
 
-const dbConfig = parseDatabaseUrl(process.env.DATABASE_URL)
+const dbConfig = buildConfig()
 
-// 生产环境禁止打印数据库配置
 if (process.env.NODE_ENV !== 'production') {
-  console.log('Database config:', { host: dbConfig.host, port: dbConfig.port, database: dbConfig.database })
+  console.log(
+    `[DB] 连接目标 -> ${dbConfig.host}:${dbConfig.port}/${dbConfig.database} (user: ${dbConfig.user})`
+  )
 }
 
 const pool = new Pool({
@@ -43,29 +69,24 @@ const pool = new Pool({
   database: dbConfig.database,
   user: dbConfig.user,
   password: dbConfig.password,
-  // 连接池配置 - 提高稳定性
-  max: 20,                     // 最大连接数
-  idleTimeoutMillis: 30000,    // 空闲30秒后关闭
-  connectionTimeoutMillis: 5000, // 连接超时5秒
-  // 自动重连
-  allowExitOnIdle: false
+  max: 20,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 5000,
+  allowExitOnIdle: false,
 })
 
-// 连接池错误处理 - 不让数据库错误导致崩溃
-pool.on('error', (err, client) => {
-  console.error('【数据库连接池错误】:', err.message)
-  // 错误已被处理，不关闭应用
+pool.on('error', (err) => {
+  console.error('[DB] 连接池异常:', err.message)
 })
 
-// 定期检查连接健康
 setInterval(async () => {
   try {
     const client = await pool.connect()
     await client.query('SELECT 1')
     client.release()
   } catch (e) {
-    console.error('【数据库健康检查失败】:', e.message)
+    console.error('[DB] 健康检查失败:', e.message)
   }
-}, 60000) // 每分钟检查一次
+}, 60_000)
 
 export default pool
