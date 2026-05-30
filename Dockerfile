@@ -1,36 +1,33 @@
 # ============================================================
-# xuexi-habit-app 后端镜像 — 多阶段构建
-# ============================================================
-# 构建：  docker build -t xuexi-habit-app .
-# 运行：  docker run -p 8080:8080 --env-file .env xuexi-habit-app
+# xuexi-habit-app — 多阶段构建（后端 API + 前端 SPA）
 # ============================================================
 
-# ------------------- Stage 1: 依赖安装 -------------------
-FROM node:20-alpine AS builder
+# ------------------- Stage 1: 构建前端 -------------------
+FROM node:20-alpine AS frontend-builder
+WORKDIR /app/frontend
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
 
+# ------------------- Stage 2: 安装后端依赖 -------------------
+FROM node:20-alpine AS backend-deps
 WORKDIR /build
-
 COPY backend/package.json backend/package-lock.json* ./
 RUN npm ci --production && npm cache clean --force
 
-# ------------------- Stage 2: 生产运行镜像 -------------------
+# ------------------- Stage 3: 最终镜像 -------------------
 FROM node:20-alpine
 
-RUN addgroup -g 1001 -S nodejs \
- && adduser  -S nodejs -u 1001
-
+RUN addgroup -g 1001 -S nodejs && adduser -S nodejs -u 1001
 WORKDIR /app
 
-COPY --from=builder --chown=nodejs:nodejs /build/node_modules ./node_modules
+COPY --from=backend-deps --chown=nodejs:nodejs /build/node_modules ./node_modules
 COPY --chown=nodejs:nodejs backend/package.json ./
-COPY --chown=nodejs:nodejs backend/src/       ./src/
-COPY --chown=nodejs:nodejs backend/public/    ./public/
+COPY --chown=nodejs:nodejs backend/src/ ./src/
+COPY --chown=nodejs:nodejs backend/public/ ./public/
+COPY --from=frontend-builder --chown=nodejs:nodejs /app/frontend/dist ./public/
 
 EXPOSE 8080
-
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD node -e "require('http').get('http://localhost:8080/api/health',(r)=>{process.exit(r.statusCode===200?0:1)})"
-
 USER nodejs
-
 CMD ["node", "src/app.js"]
